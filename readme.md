@@ -1,0 +1,1 @@
+Speech Emotion Recognition aims to recognize the emotion of the speaker.
