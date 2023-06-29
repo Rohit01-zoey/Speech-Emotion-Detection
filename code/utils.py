@@ -4,6 +4,7 @@ import os
 import opensmile
 import librosa
 import joblib
+from sklearn.model_selection import LeaveOneGroupOut
 
 class StandardScaleNormalizer:
     def __init__(self):
@@ -62,22 +63,23 @@ class StandardScaleNormalizer:
         return self.transform(X, speaker)
 
 class CustomDataLoader:
-    def __init__(self, data, speaker_ids, utt_ids):
+    def __init__(self, data, speaker_ids, emotion_ids, utt_ids):
         self.data = data
         self.speaker_ids = speaker_ids
+        self.emotion_ids = emotion_ids
         self.utt_ids = utt_ids
 
     def get_data_by_speaker(self, speaker_id):
         mask = [speaker == speaker_id for speaker in self.speaker_ids]
-        return [item for item, m in zip(self.data, mask) if m]
+        return [item for item, m in zip(self.data.to_numpy(), mask) if m]
 
     def get_data_by_utt(self, utt_id):
         mask = [utt == utt_id for utt in self.utt_ids]
-        return [item for item, m in zip(self.data, mask) if m]
+        return [item for item, m in zip(self.data.to_numpy(), mask) if m]
 
     def get_data_by_speaker_utt(self, speaker_id, utt_id):
         mask = [(speaker == speaker_id) and (utt == utt_id) for speaker, utt in zip(self.speaker_ids, self.utt_ids)]
-        return [item for item, m in zip(self.data, mask) if m]
+        return [item for item, m in zip(self.data.to_numpy(), mask) if m]
 
 
 def load_wav_features(directory):
@@ -151,3 +153,91 @@ def process_ravdess(file_names : list):
         emotions.append(labels_dict[file.split('-')[2]])
         utt_ids.append(utt_dict[file.split('-')[4]])
     return emotions, utt_ids
+
+def process_hindi(file_names : list):
+    # labels_dict = {'01' : 'neutral', '02' : 'calm', '03' : 'happy', '04' : 'sad', '05' : 'angry', '06' : 'fearful', '07' : 'disgust', '08' : 'surprised'}
+    # utt_dict = {'01':"kids", '02':"dogs"}
+    emotions = []
+    utt_ids = []
+    for file in file_names:
+        emotions.append(file.split('.')[0].split('_')[3])
+        utt_ids.append(file.split('.')[0].split('_')[4])
+    return emotions, utt_ids
+
+def process_savee(file_names : list):
+    emotion = []
+    for file in file_names:
+        ele = file[:-6]
+        if ele=='a':
+            emotion.append('angry')
+        elif ele=='d':
+            emotion.append('disgust')
+        elif ele=='f':
+            emotion.append('fear')
+        elif ele=='h':
+            emotion.append('happy')
+        elif ele=='n':
+            emotion.append('neutral')
+        elif ele=='sa':
+            emotion.append('sad')
+        else:
+            emotion.append('surprise')
+    return emotion
+    
+
+def process_emodb(file_names : list):
+    labels_dict = {'W' : 'angry', 'L' : 'boredom', 'E' : 'disgust', 'A' : 'fearful', 'F' : 'happy', 'T' : 'sad', 'N' : 'neutral'}
+    utt_dict = {'03':"kids", '08':"dogs"}
+    emotions = []
+    utt_ids = []
+    for file in file_names:
+        emotions.append(labels_dict[file.split('.')[0].split('_')[2]])
+        utt_ids.append(utt_dict[file.split('.')[0].split('_')[0]])
+    return emotions, utt_ids
+
+
+#write a function which takes in dataloader class as above and returns an iterator which leaves out one speaker at a time. It should take in features, emoitons_list etc use leaveonegropout
+def leave_one_speaker_out(dataloader):
+    logo = LeaveOneGroupOut()
+    for i, (train_index, test_index) in enumerate(logo.split(X=dataloader.data, groups=dataloader.speaker_ids)):
+        # print("TRAIN:", train_index, "TEST:", test_index)
+        data_train, data_test = np.array(dataloader.data)[train_index], np.array(dataloader.data)[test_index]
+        emotion_train, emotion_test = np.array(dataloader.emotion_ids)[train_index], np.array(dataloader.emotion_ids)[test_index]
+        utt_train, utt_test = np.array(dataloader.utt_ids)[train_index], np.array(dataloader.utt_ids)[test_index]
+        speaker_train, speaker_test = np.array(dataloader.speaker_ids)[train_index], np.array(dataloader.speaker_ids)[test_index]
+        yield data_train, data_test, emotion_train, emotion_test, utt_train, utt_test, speaker_train, speaker_test
+
+
+
+# write a code for leaving one speaker out and training a model on the rest of the speakers the user should be able to pass a param_grid to select best paraemters
+def train_svm_ensemble(features, labels, speaker_ids, utt_ids, model_path, param_grid, n_jobs=1):
+    '''
+    features : numpy array of features
+    labels : list of labels
+    speaker_ids : list of speaker ids
+    utt_ids : list of utt_ids
+    model_path : path to save the trained models
+    param_grid : param_grid for the SVM
+    '''
+    # get unique speaker ids
+    unique_speaker_ids = np.unique(speaker_ids)
+    # get unique utt_ids
+    unique_utt_ids = np.unique(utt_ids)
+    # create a custom dataloader
+    dataloader = CustomDataLoader(features, speaker_ids, utt_ids)
+    # create a leave one speaker out cross validation
+    loo = LeaveOneOut()
+    # create a grid search object
+    grid_search = GridSearchCV(SVC(), param_grid, cv=loo, n_jobs=n_jobs)
+    # iterate over unique speaker ids
+    for speaker_id in unique_speaker_ids:
+        # get data for the current speaker
+        X = dataloader.get_data_by_speaker(speaker_id)
+        # get labels for the current speaker
+        y = labels[speaker_ids == speaker_id]
+        # fit the grid search object
+        grid_search.fit(X, y)
+        # save the model
+        joblib.dump(grid_search.best_estimator_, model_path+'svc_model_'+str(speaker_id)+'.pkl')
+        print("Saved model with {spk} left out while training".format(spk=speaker_id))
+ 
